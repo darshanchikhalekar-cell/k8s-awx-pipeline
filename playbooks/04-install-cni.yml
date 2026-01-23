@@ -1,7 +1,0 @@
-- name: Install Flannel CNI
-  hosts: k8s_master
-  become: true
-
-  tasks:
-    - name: Apply flannel
-      command: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
