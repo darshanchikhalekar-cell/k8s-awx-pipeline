@@ -1,0 +1,29 @@
+- name: Kubernetes OS prerequisites
+  hosts: k8s_cluster
+  become: true
+
+  tasks:
+    - name: Disable swap
+      command: swapoff -a
+
+    - name: Remove swap from fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^.*swap.*$'
+        replace: ''
+
+    - name: Install required packages
+      apt:
+        name:
+          - curl
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - containerd
+        update_cache: yes
+
+    - name: Enable containerd
+      systemd:
+        name: containerd
+        enabled: true
+        state: started

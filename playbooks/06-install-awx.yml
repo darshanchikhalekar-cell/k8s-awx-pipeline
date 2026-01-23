@@ -1,0 +1,20 @@
+- name: Deploy AWX
+  hosts: k8s_master
+  become: true
+
+  tasks:
+    - name: Create AWX CR
+      copy:
+        dest: /tmp/awx.yml
+        content: |
+          apiVersion: awx.ansible.com/v1beta1
+          kind: AWX
+          metadata:
+            name: awx
+            namespace: awx
+          spec:
+            service_type: NodePort
+            replicas: 1
+
+    - name: Apply AWX
+      command: kubectl apply -f /tmp/awx.yml

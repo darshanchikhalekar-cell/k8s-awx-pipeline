@@ -1,0 +1,17 @@
+- name: Verify Setup
+  hosts: k8s_master
+  become: true
+
+  tasks:
+    - name: Nodes
+      command: kubectl get nodes
+
+    - name: AWX Pods
+      command: kubectl get pods -n awx
+
+    - name: Get AWX admin password
+      command: kubectl get secret awx-admin-password -n awx -o jsonpath="{.data.password}" | base64 --decode
+      register: awx_pass
+
+    - debug:
+        msg: "AWX Admin Password: {{ awx_pass.stdout }}"

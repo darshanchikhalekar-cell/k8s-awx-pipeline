@@ -1,0 +1,24 @@
+- name: Install kubeadm, kubelet, kubectl
+  hosts: k8s_cluster
+  become: true
+
+  tasks:
+    - name: Add Kubernetes repo
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key |
+        gpg --dearmor -o /usr/share/keyrings/k8s.gpg
+
+        echo "deb [signed-by=/usr/share/keyrings/k8s.gpg] \
+        https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /" \
+        > /etc/apt/sources.list.d/kubernetes.list
+
+    - name: Install packages
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        update_cache: yes
+
+    - name: Hold packages
+      command: apt-mark hold kubelet kubeadm kubectl
