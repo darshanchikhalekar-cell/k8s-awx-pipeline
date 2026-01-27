@@ -1,8 +1,8 @@
 ---
-############################################
-# PLAY 1: CREATE DYNAMIC HOST FROM SURVEY
-############################################
-- name: Build dynamic inventory from survey
+#########################################################
+# PLAY 1: BUILD DYNAMIC INVENTORY FROM SURVEY INPUT
+#########################################################
+- name: Build dynamic inventory
   hosts: localhost
   gather_facts: false
 
@@ -25,21 +25,26 @@
 
     - name: Show target VM details
       debug:
-        msg: "Target VM: {{ target_vm_user }}@{{ target_vm_ip }}"
+        msg: "Installing Kubernetes + AWX on {{ target_vm_user }}@{{ target_vm_ip }}"
 
-############################################
+#########################################################
 # PLAY 2: INSTALL KUBERNETES + AWX
-############################################
-- name: Install Kubernetes and AWX on target VM
+#########################################################
+- name: Install Kubernetes and AWX
   hosts: k8s_master
   become: true
+  gather_facts: false
 
   vars:
-    pod_network_cidr: "{{ pod_network_cidr | default('10.244.0.0/16') }}"
+    # ---- SAFE DEFAULTS (NOT IN SURVEY) ----
+    pod_network_cidr: "10.244.0.0/16"
+    k8s_version: "1.29"
     awx_namespace: "{{ awx_namespace | default('awx') }}"
-    k8s_version: "{{ k8s_version | default('1.29') }}"
 
   tasks:
+    # -------------------------------
+    # OS PRE-REQS
+    # -------------------------------
     - name: Disable swap
       command: swapoff -a
       ignore_errors: true
@@ -50,12 +55,12 @@
         regexp: '^.*swap.*$'
         replace: ''
 
-    - name: Install OS dependencies
+    - name: Install base packages
       apt:
         name:
           - curl
-          - apt-transport-https
           - ca-certificates
+          - apt-transport-https
           - gnupg
           - containerd
         update_cache: yes
@@ -66,16 +71,19 @@
         state: started
         enabled: true
 
-    - name: Add Kubernetes repo
+    # -------------------------------
+    # KUBERNETES INSTALL
+    # -------------------------------
+    - name: Add Kubernetes apt repo
       shell: |
-        curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key |
-        gpg --dearmor -o /usr/share/keyrings/k8s.gpg
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key \
+        | gpg --dearmor -o /usr/share/keyrings/k8s.gpg
 
         echo "deb [signed-by=/usr/share/keyrings/k8s.gpg] \
         https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /" \
         > /etc/apt/sources.list.d/kubernetes.list
 
-    - name: Install Kubernetes components
+    - name: Install Kubernetes packages
       apt:
         name:
           - kubelet
@@ -86,7 +94,10 @@
     - name: Hold Kubernetes packages
       command: apt-mark hold kubelet kubeadm kubectl
 
-    - name: Initialize Kubernetes (run once)
+    # -------------------------------
+    # CLUSTER INIT
+    # -------------------------------
+    - name: Initialize Kubernetes cluster (run once)
       command: kubeadm init --pod-network-cidr={{ pod_network_cidr }}
       args:
         creates: /etc/kubernetes/admin.conf
@@ -97,10 +108,16 @@
         cp /etc/kubernetes/admin.conf /home/{{ target_vm_user }}/.kube/config
         chown -R {{ target_vm_user }}:{{ target_vm_user }} /home/{{ target_vm_user }}/.kube
 
+    # -------------------------------
+    # CNI (FLANNEL)
+    # -------------------------------
     - name: Install Flannel CNI
       become_user: "{{ target_vm_user }}"
       command: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
 
+    # -------------------------------
+    # AWX OPERATOR
+    # -------------------------------
     - name: Create AWX namespace
       become_user: "{{ target_vm_user }}"
       command: kubectl create namespace {{ awx_namespace }}
@@ -110,6 +127,9 @@
       become_user: "{{ target_vm_user }}"
       command: kubectl apply -k github.com/ansible/awx-operator/config/default?ref=release-2.12.0
 
+    # -------------------------------
+    # AWX DEPLOYMENT
+    # -------------------------------
     - name: Create AWX Custom Resource
       copy:
         dest: /tmp/awx.yml
@@ -127,10 +147,12 @@
       become_user: "{{ target_vm_user }}"
       command: kubectl apply -f /tmp/awx.yml
 
-    - name: Wait for AWX pods
+    # -------------------------------
+    # VERIFY
+    # -------------------------------
+    - name: Wait for AWX pods to be ready
       become_user: "{{ target_vm_user }}"
-      shell: |
-        kubectl get pods -n {{ awx_namespace }} | grep -v Running
+      shell: kubectl get pods -n {{ awx_namespace }} | grep -v Running
       register: awx_pods
       retries: 20
       delay: 30
@@ -139,8 +161,8 @@
     - name: Get AWX admin password
       become_user: "{{ target_vm_user }}"
       command: kubectl get secret awx-admin-password -n {{ awx_namespace }} -o jsonpath="{.data.password}" | base64 --decode
-      register: awx_pass
+      register: awx_admin_pass
 
     - name: Show AWX admin password
       debug:
-        msg: "AWX Admin Password: {{ awx_pass.stdout }}"
+        msg: "AWX Admin Password: {{ awx_admin_pass.stdout }}"
