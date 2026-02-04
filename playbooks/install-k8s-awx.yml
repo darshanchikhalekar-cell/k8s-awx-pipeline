@@ -70,7 +70,7 @@
         replace: ''
 
     #####################################################
-    # PRE-CLEAN BROKEN DOCKER REPO (CRITICAL FIX)
+    # PRE-CLEAN BROKEN DOCKER REPO (MUST COME FIRST)
     #####################################################
     - name: Remove broken Docker apt repo if present
       file:
@@ -78,7 +78,14 @@
         state: absent
 
     #####################################################
-    # BASE PACKAGES
+    # APT UPDATE (SAFE NOW)
+    #####################################################
+    - name: Update apt cache after cleanup
+      apt:
+        update_cache: yes
+
+    #####################################################
+    # BASE PACKAGES (NO update_cache HERE)
     #####################################################
     - name: Install base packages
       apt:
@@ -88,7 +95,6 @@
           - gnupg
           - apt-transport-https
           - cri-tools
-        update_cache: yes
         lock_timeout: 600
 
     #####################################################
@@ -107,14 +113,17 @@
         content: |
           deb [arch=amd64 signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
 
+    - name: Update apt cache after adding Docker repo
+      apt:
+        update_cache: yes
+
     - name: Install containerd.io (CRI-enabled)
       apt:
         name: containerd.io
-        update_cache: yes
         lock_timeout: 600
 
     #####################################################
-    # CONTAINERD CONFIG (CRI + SYSTEMD CGROUP)
+    # CONTAINERD CONFIG
     #####################################################
     - name: Configure containerd
       shell: |
@@ -124,7 +133,7 @@
       notify: restart containerd
 
     #####################################################
-    # CRICTL CONFIG (FORCE CONTAINERD SOCKET)
+    # CRICTL CONFIG
     #####################################################
     - name: Configure crictl
       copy:
@@ -136,14 +145,14 @@
           debug: false
 
     #####################################################
-    # KERNEL + SYSCTL (REQUIRED BY K8s)
+    # KERNEL + SYSCTL
     #####################################################
     - name: Load kernel modules
       shell: |
         modprobe overlay
         modprobe br_netfilter
 
-    - name: Configure sysctl for Kubernetes
+    - name: Configure sysctl
       copy:
         dest: /etc/sysctl.d/k8s.conf
         content: |
@@ -170,6 +179,10 @@
         content: |
           deb [signed-by=/usr/share/keyrings/k8s.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /
 
+    - name: Update apt cache after Kubernetes repo
+      apt:
+        update_cache: yes
+
     #####################################################
     # KUBERNETES INSTALL
     #####################################################
@@ -179,22 +192,18 @@
           - kubelet
           - kubeadm
           - kubectl
-        update_cache: yes
         lock_timeout: 600
 
     - name: Hold Kubernetes packages
       command: apt-mark hold kubelet kubeadm kubectl
 
     #####################################################
-    # RESET (SAFE RE-RUN)
+    # RESET + INIT
     #####################################################
     - name: Reset Kubernetes if partially initialized
       command: kubeadm reset -f
       ignore_errors: true
 
-    #####################################################
-    # VALIDATE CRI (MUST PASS)
-    #####################################################
     - name: Validate container runtime
       command: crictl info
       register: cri_check
@@ -202,75 +211,7 @@
       delay: 5
       until: cri_check.rc == 0
 
-    #####################################################
-    # CLUSTER INIT
-    #####################################################
     - name: Initialize Kubernetes cluster
       command: kubeadm init --pod-network-cidr={{ pod_network_cidr }}
       args:
         creates: "{{ kubeconfig }}"
-
-    #####################################################
-    # CNI – FLANNEL
-    #####################################################
-    - name: Install Flannel CNI
-      environment:
-        KUBECONFIG: "{{ kubeconfig }}"
-      command: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
-
-    #####################################################
-    # AWX OPERATOR
-    #####################################################
-    - name: Create AWX namespace
-      environment:
-        KUBECONFIG: "{{ kubeconfig }}"
-      command: kubectl create namespace {{ awx_namespace }}
-      ignore_errors: true
-
-    - name: Install AWX Operator
-      environment:
-        KUBECONFIG: "{{ kubeconfig }}"
-      command: kubectl apply -k github.com/ansible/awx-operator/config/default?ref=release-2.12.0
-
-    #####################################################
-    # AWX DEPLOYMENT
-    #####################################################
-    - name: Create AWX Custom Resource
-      copy:
-        dest: /tmp/awx.yml
-        content: |
-          apiVersion: awx.ansible.com/v1beta1
-          kind: AWX
-          metadata:
-            name: awx
-            namespace: {{ awx_namespace }}
-          spec:
-            service_type: NodePort
-            replicas: 1
-
-    - name: Deploy AWX
-      environment:
-        KUBECONFIG: "{{ kubeconfig }}"
-      command: kubectl apply -f /tmp/awx.yml
-
-    #####################################################
-    # VERIFY
-    #####################################################
-    - name: Wait for AWX pods to be ready
-      environment:
-        KUBECONFIG: "{{ kubeconfig }}"
-      shell: kubectl get pods -n {{ awx_namespace }} | grep -v Running
-      register: awx_pods
-      retries: 30
-      delay: 30
-      until: awx_pods.stdout == ""
-
-    - name: Get AWX admin password
-      environment:
-        KUBECONFIG: "{{ kubeconfig }}"
-      shell: kubectl get secret awx-admin-password -n {{ awx_namespace }} -o jsonpath="{.data.password}" | base64 --decode
-      register: awx_admin_pass
-
-    - name: Show AWX admin password
-      debug:
-        msg: "AWX Admin Password: {{ awx_admin_pass.stdout }}"
