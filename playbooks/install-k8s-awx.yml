@@ -9,10 +9,8 @@
   tasks:
     - name: Validate required survey inputs
       fail:
-        msg: "target_vm_ip and target_vm_user are required"
-      when:
-        - target_vm_ip is not defined
-        - target_vm_user is not defined
+        msg: "Both target_vm_ip and target_vm_user are required from survey"
+      when: target_vm_ip is not defined or target_vm_user is not defined
 
     - name: Add target VM dynamically
       add_host:
@@ -36,15 +34,21 @@
   gather_facts: false
 
   vars:
-    # ---- SAFE DEFAULTS (NOT IN SURVEY) ----
     pod_network_cidr: "10.244.0.0/16"
     k8s_version: "1.29"
     awx_namespace: "{{ awx_namespace | default('awx') }}"
+    kubeconfig: /etc/kubernetes/admin.conf
+
+  handlers:
+    - name: restart containerd
+      systemd:
+        name: containerd
+        state: restarted
 
   tasks:
-    # -------------------------------
+    #####################################################
     # OS PRE-REQS
-    # -------------------------------
+    #####################################################
     - name: Disable swap
       command: swapoff -a
       ignore_errors: true
@@ -65,15 +69,21 @@
           - containerd
         update_cache: yes
 
-    - name: Enable containerd
+    - name: Configure containerd
+      shell: |
+        containerd config default > /etc/containerd/config.toml
+        sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+      notify: restart containerd
+
+    - name: Enable and start containerd
       systemd:
         name: containerd
-        state: started
         enabled: true
+        state: started
 
-    # -------------------------------
+    #####################################################
     # KUBERNETES INSTALL
-    # -------------------------------
+    #####################################################
     - name: Add Kubernetes apt repo
       shell: |
         curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key \
@@ -94,42 +104,39 @@
     - name: Hold Kubernetes packages
       command: apt-mark hold kubelet kubeadm kubectl
 
-    # -------------------------------
+    #####################################################
     # CLUSTER INIT
-    # -------------------------------
-    - name: Initialize Kubernetes cluster (run once)
+    #####################################################
+    - name: Initialize Kubernetes cluster
       command: kubeadm init --pod-network-cidr={{ pod_network_cidr }}
       args:
-        creates: /etc/kubernetes/admin.conf
+        creates: "{{ kubeconfig }}"
 
-    - name: Configure kubeconfig for target user
-      shell: |
-        mkdir -p /home/{{ target_vm_user }}/.kube
-        cp /etc/kubernetes/admin.conf /home/{{ target_vm_user }}/.kube/config
-        chown -R {{ target_vm_user }}:{{ target_vm_user }} /home/{{ target_vm_user }}/.kube
-
-    # -------------------------------
-    # CNI (FLANNEL)
-    # -------------------------------
+    #####################################################
+    # CNI - FLANNEL
+    #####################################################
     - name: Install Flannel CNI
-      become_user: "{{ target_vm_user }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
       command: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
 
-    # -------------------------------
+    #####################################################
     # AWX OPERATOR
-    # -------------------------------
+    #####################################################
     - name: Create AWX namespace
-      become_user: "{{ target_vm_user }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
       command: kubectl create namespace {{ awx_namespace }}
       ignore_errors: true
 
     - name: Install AWX Operator
-      become_user: "{{ target_vm_user }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
       command: kubectl apply -k github.com/ansible/awx-operator/config/default?ref=release-2.12.0
 
-    # -------------------------------
+    #####################################################
     # AWX DEPLOYMENT
-    # -------------------------------
+    #####################################################
     - name: Create AWX Custom Resource
       copy:
         dest: /tmp/awx.yml
@@ -144,14 +151,16 @@
             replicas: 1
 
     - name: Deploy AWX
-      become_user: "{{ target_vm_user }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
       command: kubectl apply -f /tmp/awx.yml
 
-    # -------------------------------
+    #####################################################
     # VERIFY
-    # -------------------------------
+    #####################################################
     - name: Wait for AWX pods to be ready
-      become_user: "{{ target_vm_user }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
       shell: kubectl get pods -n {{ awx_namespace }} | grep -v Running
       register: awx_pods
       retries: 20
@@ -159,8 +168,9 @@
       until: awx_pods.stdout == ""
 
     - name: Get AWX admin password
-      become_user: "{{ target_vm_user }}"
-      command: kubectl get secret awx-admin-password -n {{ awx_namespace }} -o jsonpath="{.data.password}" | base64 --decode
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      shell: kubectl get secret awx-admin-password -n {{ awx_namespace }} -o jsonpath="{.data.password}" | base64 --decode
       register: awx_admin_pass
 
     - name: Show AWX admin password
