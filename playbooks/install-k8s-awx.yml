@@ -26,7 +26,7 @@
         msg: "Installing Kubernetes + AWX on {{ target_vm_user }}@{{ target_vm_ip }}"
 
 #########################################################
-# PLAY 2: INSTALL KUBERNETES + AWX
+# PLAY 2: INSTALL KUBERNETES + AWX (FULLY AUTOMATED)
 #########################################################
 - name: Install Kubernetes and AWX
   hosts: k8s_master
@@ -39,7 +39,7 @@
   vars:
     pod_network_cidr: "10.244.0.0/16"
     k8s_version: "1.29"
-    awx_namespace: "{{ awx_namespace | default('awx') }}"
+    awx_namespace: awx
     kubeconfig: /etc/kubernetes/admin.conf
 
   handlers:
@@ -70,22 +70,19 @@
         replace: ''
 
     #####################################################
-    # PRE-CLEAN BROKEN DOCKER REPO (MUST COME FIRST)
+    # CLEAN BROKEN APT FILES (SELF-HEALING)
     #####################################################
-    - name: Remove broken Docker apt repo if present
+    - name: Remove broken Docker repo if present
       file:
         path: /etc/apt/sources.list.d/docker.list
         state: absent
 
-    #####################################################
-    # APT UPDATE (SAFE NOW)
-    #####################################################
-    - name: Update apt cache after cleanup
+    - name: Update apt cache (clean state)
       apt:
         update_cache: yes
 
     #####################################################
-    # BASE PACKAGES (NO update_cache HERE)
+    # BASE PACKAGES
     #####################################################
     - name: Install base packages
       apt:
@@ -98,7 +95,7 @@
         lock_timeout: 600
 
     #####################################################
-    # INSTALL CRI-ENABLED CONTAINERD (DOCKER REPO)
+    # INSTALL CRI-ENABLED CONTAINERD
     #####################################################
     - name: Add Docker GPG key
       shell: |
@@ -113,18 +110,15 @@
         content: |
           deb [arch=amd64 signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
 
-    - name: Update apt cache after adding Docker repo
+    - name: Update apt cache (Docker repo)
       apt:
         update_cache: yes
 
-    - name: Install containerd.io (CRI-enabled)
+    - name: Install containerd.io
       apt:
         name: containerd.io
         lock_timeout: 600
 
-    #####################################################
-    # CONTAINERD CONFIG
-    #####################################################
     - name: Configure containerd
       shell: |
         mkdir -p /etc/containerd
@@ -132,17 +126,12 @@
         sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
       notify: restart containerd
 
-    #####################################################
-    # CRICTL CONFIG
-    #####################################################
     - name: Configure crictl
       copy:
         dest: /etc/crictl.yaml
         content: |
           runtime-endpoint: unix:///run/containerd/containerd.sock
           image-endpoint: unix:///run/containerd/containerd.sock
-          timeout: 10
-          debug: false
 
     #####################################################
     # KERNEL + SYSCTL
@@ -164,28 +153,23 @@
       command: sysctl --system
 
     #####################################################
-    # KUBERNETES APT REPO
+    # KUBERNETES INSTALL
     #####################################################
-    - name: Add Kubernetes apt GPG key
+    - name: Add Kubernetes GPG key
       shell: |
         curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key \
         | gpg --dearmor -o /usr/share/keyrings/k8s.gpg
-      args:
-        creates: /usr/share/keyrings/k8s.gpg
 
-    - name: Add Kubernetes apt repository
+    - name: Add Kubernetes repo
       copy:
         dest: /etc/apt/sources.list.d/kubernetes.list
         content: |
           deb [signed-by=/usr/share/keyrings/k8s.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /
 
-    - name: Update apt cache after Kubernetes repo
+    - name: Update apt cache (K8s)
       apt:
         update_cache: yes
 
-    #####################################################
-    # KUBERNETES INSTALL
-    #####################################################
     - name: Install Kubernetes packages
       apt:
         name:
@@ -198,13 +182,13 @@
       command: apt-mark hold kubelet kubeadm kubectl
 
     #####################################################
-    # RESET + INIT
+    # KUBERNETES INIT
     #####################################################
     - name: Reset Kubernetes if partially initialized
       command: kubeadm reset -f
       ignore_errors: true
 
-    - name: Validate container runtime
+    - name: Validate CRI
       command: crictl info
       register: cri_check
       retries: 10
@@ -215,3 +199,55 @@
       command: kubeadm init --pod-network-cidr={{ pod_network_cidr }}
       args:
         creates: "{{ kubeconfig }}"
+
+    #####################################################
+    # INSTALL FLANNEL CNI
+    #####################################################
+    - name: Install Flannel CNI
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      command: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+
+    #####################################################
+    # 🚨 WAIT FOR NODE READY (CRITICAL FIX)
+    #####################################################
+    - name: Wait for Kubernetes node to be Ready
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      shell: kubectl get nodes --no-headers | awk '{print $2}'
+      register: node_status
+      retries: 30
+      delay: 10
+      until: node_status.stdout == "Ready"
+
+    #####################################################
+    # INSTALL AWX (AUTOMATIC)
+    #####################################################
+    - name: Create AWX namespace
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      command: kubectl create namespace {{ awx_namespace }}
+      ignore_errors: true
+
+    - name: Install AWX Operator
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      command: kubectl apply -k github.com/ansible/awx-operator/config/default?ref=release-2.12.0
+
+    - name: Create AWX Custom Resource
+      copy:
+        dest: /tmp/awx.yml
+        content: |
+          apiVersion: awx.ansible.com/v1beta1
+          kind: AWX
+          metadata:
+            name: awx
+            namespace: {{ awx_namespace }}
+          spec:
+            service_type: NodePort
+            replicas: 1
+
+    - name: Apply AWX CR
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      command: kubectl apply -f /tmp/awx.yml
