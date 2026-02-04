@@ -77,34 +77,45 @@
           - apt-transport-https
           - gnupg
           - containerd
+          - cri-tools
         update_cache: yes
         lock_timeout: 600
 
     #####################################################
-    # CONTAINERD – EXPLICIT CRI CONFIG (CRITICAL FIX)
+    # CONTAINERD – EXPLICIT CRI ENABLE (CRITICAL)
     #####################################################
-    - name: Configure containerd with explicit CRI support
+    - name: Configure containerd with CRI enabled
       copy:
         dest: /etc/containerd/config.toml
         content: |
           version = 2
 
-          [plugins]
+          [plugins."io.containerd.grpc.v1.cri"]
+            sandbox_image = "registry.k8s.io/pause:3.9"
 
-            [plugins."io.containerd.grpc.v1.cri"]
-              sandbox_image = "registry.k8s.io/pause:3.9"
+            [plugins."io.containerd.grpc.v1.cri".containerd]
+              default_runtime_name = "runc"
 
-              [plugins."io.containerd.grpc.v1.cri".containerd]
-                default_runtime_name = "runc"
-
-                [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
-                  runtime_type = "io.containerd.runc.v2"
+              [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+                runtime_type = "io.containerd.runc.v2"
       notify:
         - restart containerd
         - restart kubelet
 
     #####################################################
-    # KERNEL + SYSCTL
+    # CONFIGURE CRICTL (FIX SOCKET)
+    #####################################################
+    - name: Configure crictl to use containerd socket
+      copy:
+        dest: /etc/crictl.yaml
+        content: |
+          runtime-endpoint: unix:///run/containerd/containerd.sock
+          image-endpoint: unix:///run/containerd/containerd.sock
+          timeout: 10
+          debug: false
+
+    #####################################################
+    # KERNEL + SYSCTL (REQUIRED)
     #####################################################
     - name: Load kernel modules
       shell: |
@@ -161,12 +172,12 @@
       ignore_errors: true
 
     #####################################################
-    # VALIDATE CRI (IMPORTANT)
+    # VALIDATE CRI (MUST PASS)
     #####################################################
     - name: Validate container runtime (CRI)
       command: crictl info
       register: cri_check
-      retries: 5
+      retries: 10
       delay: 5
       until: cri_check.rc == 0
 
