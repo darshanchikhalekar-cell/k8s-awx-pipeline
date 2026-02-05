@@ -1,18 +1,18 @@
 ---
 #########################################################
-# PLAY 1: BUILD DYNAMIC INVENTORY FROM SURVEY INPUT
+# PLAY 1: BUILD DYNAMIC INVENTORY
 #########################################################
 - name: Build dynamic inventory
   hosts: localhost
   gather_facts: false
 
   tasks:
-    - name: Validate required survey inputs
+    - name: Validate survey inputs
       fail:
-        msg: "Both target_vm_ip and target_vm_user are required from survey"
+        msg: "target_vm_ip and target_vm_user are required"
       when: target_vm_ip is not defined or target_vm_user is not defined
 
-    - name: Add target VM dynamically
+    - name: Add target VM
       add_host:
         name: k8s-master
         groups: k8s_master
@@ -21,7 +21,7 @@
         ansible_become: true
         ansible_become_method: sudo
 
-    - name: Show target VM details
+    - name: Show target
       debug:
         msg: "Installing Kubernetes + AWX on {{ target_vm_user }}@{{ target_vm_ip }}"
 
@@ -37,10 +37,10 @@
     DEBIAN_FRONTEND: noninteractive
 
   vars:
-    pod_network_cidr: "10.244.0.0/16"
     k8s_version: "1.29"
-    awx_namespace: awx
+    pod_network_cidr: "10.244.0.0/16"
     kubeconfig: /etc/kubernetes/admin.conf
+    awx_namespace: awx
 
   handlers:
     - name: restart containerd
@@ -70,14 +70,14 @@
         replace: ''
 
     #####################################################
-    # CLEAN BROKEN APT FILES (SELF-HEALING)
+    # CLEAN APT STATE
     #####################################################
-    - name: Remove broken Docker repo if present
+    - name: Remove broken Docker repo
       file:
         path: /etc/apt/sources.list.d/docker.list
         state: absent
 
-    - name: Update apt cache (clean state)
+    - name: Update apt cache
       apt:
         update_cache: yes
 
@@ -87,15 +87,15 @@
     - name: Install base packages
       apt:
         name:
-          - ca-certificates
           - curl
+          - ca-certificates
           - gnupg
           - apt-transport-https
           - cri-tools
         lock_timeout: 600
 
     #####################################################
-    # INSTALL CRI-ENABLED CONTAINERD
+    # CONTAINERD (CRI)
     #####################################################
     - name: Add Docker GPG key
       shell: |
@@ -104,17 +104,17 @@
       args:
         creates: /usr/share/keyrings/docker.gpg
 
-    - name: Add Docker apt repository
+    - name: Add Docker repo
       copy:
         dest: /etc/apt/sources.list.d/docker.list
         content: |
           deb [arch=amd64 signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
 
-    - name: Update apt cache (Docker repo)
+    - name: Update apt cache (Docker)
       apt:
         update_cache: yes
 
-    - name: Install containerd.io
+    - name: Install containerd
       apt:
         name: containerd.io
         lock_timeout: 600
@@ -134,7 +134,7 @@
           image-endpoint: unix:///run/containerd/containerd.sock
 
     #####################################################
-    # KERNEL + SYSCTL
+    # KERNEL + SYSCTL (REBOOT REQUIRED)
     #####################################################
     - name: Load kernel modules
       shell: |
@@ -151,6 +151,18 @@
 
     - name: Apply sysctl
       command: sysctl --system
+
+    #####################################################
+    # 🔴 CRITICAL: REBOOT + WAIT (SSH SAFE)
+    #####################################################
+    - name: Reboot node after kernel changes
+      reboot:
+        reboot_timeout: 600
+        test_command: whoami
+
+    - name: Wait for SSH
+      wait_for_connection:
+        timeout: 300
 
     #####################################################
     # KUBERNETES INSTALL
@@ -182,36 +194,36 @@
       command: apt-mark hold kubelet kubeadm kubectl
 
     #####################################################
-    # KUBERNETES INIT
+    # CLUSTER INIT
     #####################################################
-    - name: Reset Kubernetes if partially initialized
+    - name: Reset Kubernetes if exists
       command: kubeadm reset -f
       ignore_errors: true
 
     - name: Validate CRI
       command: crictl info
-      register: cri_check
+      register: cri
       retries: 10
       delay: 5
-      until: cri_check.rc == 0
+      until: cri.rc == 0
 
-    - name: Initialize Kubernetes cluster
+    - name: Initialize Kubernetes
       command: kubeadm init --pod-network-cidr={{ pod_network_cidr }}
       args:
         creates: "{{ kubeconfig }}"
 
     #####################################################
-    # INSTALL FLANNEL CNI
+    # CNI
     #####################################################
-    - name: Install Flannel CNI
+    - name: Install Flannel
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
       command: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
 
     #####################################################
-    # 🚨 WAIT FOR NODE READY (CRITICAL FIX)
+    # WAIT FOR NODE READY (ABSOLUTE MUST)
     #####################################################
-    - name: Wait for Kubernetes node to be Ready
+    - name: Wait for node Ready
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
       shell: kubectl get nodes --no-headers | awk '{print $2}'
@@ -221,7 +233,7 @@
       until: node_status.stdout == "Ready"
 
     #####################################################
-    # INSTALL AWX (AUTOMATIC)
+    # AWX INSTALL (AUTOMATED)
     #####################################################
     - name: Create AWX namespace
       environment:
@@ -234,7 +246,7 @@
         KUBECONFIG: "{{ kubeconfig }}"
       command: kubectl apply -k github.com/ansible/awx-operator/config/default?ref=release-2.12.0
 
-    - name: Create AWX Custom Resource
+    - name: Create AWX CR
       copy:
         dest: /tmp/awx.yml
         content: |
