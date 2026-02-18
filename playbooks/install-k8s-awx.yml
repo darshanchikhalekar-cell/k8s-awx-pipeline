@@ -49,12 +49,6 @@
         state: restarted
         enabled: true
 
-    - name: restart kubelet
-      systemd:
-        name: kubelet
-        state: restarted
-        enabled: true
-
   tasks:
     #####################################################
     # OS PRE-REQS
@@ -70,7 +64,7 @@
         replace: ''
 
     #####################################################
-    # CLEAN APT STATE
+    # CLEAN APT
     #####################################################
     - name: Remove broken Docker repo
       file:
@@ -94,7 +88,7 @@
         lock_timeout: 600
 
     #####################################################
-    # INSTALL CONTAINERD (CRI)
+    # INSTALL CONTAINERD
     #####################################################
     - name: Add Docker GPG key
       shell: |
@@ -137,14 +131,29 @@
         timeout: 60
 
     #####################################################
-    # KERNEL + SYSCTL
+    # KERNEL MODULES (PERSISTENT FIX)
     #####################################################
-    - name: Load kernel modules
-      shell: |
-        modprobe overlay
-        modprobe br_netfilter
+    - name: Load overlay module
+      modprobe:
+        name: overlay
+        state: present
 
-    - name: Configure sysctl
+    - name: Load br_netfilter module
+      modprobe:
+        name: br_netfilter
+        state: present
+
+    - name: Persist kernel modules
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+
+    #####################################################
+    # SYSCTL SETTINGS
+    #####################################################
+    - name: Configure sysctl for Kubernetes
       copy:
         dest: /etc/sysctl.d/k8s.conf
         content: |
