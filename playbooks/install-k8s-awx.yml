@@ -26,7 +26,7 @@
         msg: "Installing Kubernetes + AWX on {{ target_vm_user }}@{{ target_vm_ip }}"
 
 #########################################################
-# PLAY 2: INSTALL KUBERNETES + AWX (FULLY AUTOMATED)
+# PLAY 2: INSTALL KUBERNETES + AWX
 #########################################################
 - name: Install Kubernetes and AWX
   hosts: k8s_master
@@ -91,11 +91,10 @@
           - ca-certificates
           - gnupg
           - apt-transport-https
-          - cri-tools
         lock_timeout: 600
 
     #####################################################
-    # CONTAINERD (CRI)
+    # INSTALL CONTAINERD (CRI)
     #####################################################
     - name: Add Docker GPG key
       shell: |
@@ -126,15 +125,19 @@
         sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
       notify: restart containerd
 
-    - name: Configure crictl
-      copy:
-        dest: /etc/crictl.yaml
-        content: |
-          runtime-endpoint: unix:///run/containerd/containerd.sock
-          image-endpoint: unix:///run/containerd/containerd.sock
+    - name: Ensure containerd is running
+      systemd:
+        name: containerd
+        state: started
+        enabled: true
+
+    - name: Wait for containerd socket
+      wait_for:
+        path: /run/containerd/containerd.sock
+        timeout: 60
 
     #####################################################
-    # KERNEL + SYSCTL (REBOOT REQUIRED)
+    # KERNEL + SYSCTL
     #####################################################
     - name: Load kernel modules
       shell: |
@@ -153,7 +156,7 @@
       command: sysctl --system
 
     #####################################################
-    # 🔴 CRITICAL: REBOOT + WAIT (SSH SAFE)
+    # SAFE REBOOT
     #####################################################
     - name: Reboot node after kernel changes
       reboot:
@@ -165,7 +168,7 @@
         timeout: 300
 
     #####################################################
-    # KUBERNETES INSTALL
+    # INSTALL KUBERNETES
     #####################################################
     - name: Add Kubernetes GPG key
       shell: |
@@ -200,20 +203,13 @@
       command: kubeadm reset -f
       ignore_errors: true
 
-    - name: Validate CRI
-      command: crictl info
-      register: cri
-      retries: 10
-      delay: 5
-      until: cri.rc == 0
-
     - name: Initialize Kubernetes
       command: kubeadm init --pod-network-cidr={{ pod_network_cidr }}
       args:
         creates: "{{ kubeconfig }}"
 
     #####################################################
-    # CNI
+    # INSTALL CNI
     #####################################################
     - name: Install Flannel
       environment:
@@ -221,7 +217,7 @@
       command: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
 
     #####################################################
-    # WAIT FOR NODE READY (ABSOLUTE MUST)
+    # WAIT FOR NODE READY
     #####################################################
     - name: Wait for node Ready
       environment:
@@ -233,7 +229,7 @@
       until: node_status.stdout == "Ready"
 
     #####################################################
-    # AWX INSTALL (AUTOMATED)
+    # INSTALL AWX
     #####################################################
     - name: Create AWX namespace
       environment:
